@@ -104,8 +104,8 @@ PAGE_LABELS = {
     "oven1": "🌽 เตาอบแป้ง 1",
     "oven2": "🌽 เตาอบแป้ง 2",
     "feed": "🌽 เตาอบกาก",
-    "meal": "🌽 เตาอบโปรตีน",
     "germ": "🌽 เตาอบเยอม",
+    "meal": "🌽 เตาอบโปรตีน",
     "hsw": "💧 HSW"
 }
 
@@ -813,6 +813,56 @@ if excel_path:
                             </div>
                         </div>
                         """, unsafe_allow_html=True)
+                
+                with col_reasons:
+                    # Donut Chart for proportion of downtime reasons for selected page
+                    reasons_df = df_active[df_active['เวลาหยุดเครื่อง (นาที)'] > 0].copy()
+                    if not reasons_df.empty:
+                        # Clean/normalize remarks
+                        reasons_df['หมายเหตุ_สะอาด'] = reasons_df['หมายเหตุ_สะอาด'].replace({"": "ไม่ระบุสาเหตุ", "nan": "ไม่ระบุสาเหตุ", None: "ไม่ระบุสาเหตุ"})
+                        grouped_reasons = reasons_df.groupby('หมายเหตุ_สะอาด')['เวลาหยุดเครื่อง (นาที)'].sum().reset_index()
+                        
+                        fig_dt_donut = px.pie(
+                            grouped_reasons,
+                            values='เวลาหยุดเครื่อง (นาที)',
+                            names='หมายเหตุ_สะอาด',
+                            hole=0.4,
+                            color_discrete_sequence=px.colors.qualitative.Reds
+                        )
+                        fig_dt_donut.update_layout(
+                            title='<b>สัดส่วนสาเหตุหยุดเครื่อง (นาที)</b>',
+                            margin=dict(l=10, r=10, t=40, b=10),
+                            height=280,
+                            legend=dict(orientation="h", x=0, y=-0.2),
+                            paper_bgcolor='rgba(0,0,0,0)',
+                        )
+                        with st.container(border=True):
+                            st.plotly_chart(fig_dt_donut, use_container_width=True)
+                            
+                    with st.container(border=True):
+                        st.markdown("<h3 style='margin-top:0; color: #dc2626; font-size: 1.1rem; border-bottom: 1.5px solid #fee2e2; padding-bottom: 8px;'>🚨 ประวัติเครื่องจักรขัดข้อง</h3>", unsafe_allow_html=True)
+                        if not reasons_df.empty:
+                            # Show list of incidents sorted by downtime minutes descending
+                            reasons_sorted = reasons_df.sort_values(by='เวลาหยุดเครื่อง (นาที)', ascending=False)
+                            incidents_html = ""
+                            for _, row in reasons_sorted.iterrows():
+                                date_str = row['วันที่ผลิต'].strftime('%d/%m/%Y')
+                                remark = row['หมายเหตุ_สะอาด'] if row['หมายเหตุ_สะอาด'] else "ไม่ระบุสาเหตุ"
+                                incidents_html += f"""
+                                <div style="display: flex; gap: 12px; padding: 10px 0; border-bottom: 1px solid #f1f5f9; align-items: flex-start;">
+                                    <div style="background-color: #fee2e2; color: #dc2626; border-radius: 8px; padding: 4px 6px; font-weight: 700; font-size: 0.8rem; text-align: center; min-width: 90px;">
+                                        {row['เวลาหยุดเครื่อง (นาที)']:.0f} นาที
+                                        <br><span style="font-size: 0.68rem; font-weight: 500;">({row['เวลาหยุดเครื่อง (นาที)']/60.0:.1f} ชม.)</span>
+                                    </div>
+                                    <div>
+                                        <div style="font-weight: 600; color: #334155; font-size: 0.85rem;">วันที่ {date_str}</div>
+                                        <div style="font-size: 0.78rem; color: #64748b; margin-top: 1px;">สาเหตุ: {remark}</div>
+                                    </div>
+                                </div>
+                                """
+                            st.markdown(incidents_html, unsafe_allow_html=True)
+                        else:
+                            st.markdown("<div style='color: #166534; font-weight: 600; text-align: center; padding: 40px 0; font-size: 0.9rem;'>🎉 ไม่พบรายงานประวัติเครื่องหยุดขัดข้อง</div>", unsafe_allow_html=True)
                 
                 # 3. Middle: Interactive Daily Detail Viewer
                 st.markdown("### 🔍 เจาะลึกข้อมูลรายวัน (Daily Detail Viewer)")
