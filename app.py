@@ -101,11 +101,11 @@ st.markdown("""
 
 PAGE_LABELS = {
     "overview": "📊 ภาพรวมการผลิต",
-    "oven1": "🍞 เตาอบแป้ง 1",
-    "oven2": "🍪 เตาอบแป้ง 2",
-    "feed": "🌾 เตาอบกาก",
-    "meal": "🍖 เตาอบโปรตีน",
-    "germ": "🌱 เตาอบเยอม",
+    "oven1": "🌽 เตาอบแป้ง 1",
+    "oven2": "🌽 เตาอบแป้ง 2",
+    "feed": "🌽 เตาอบกาก",
+    "meal": "🌽 เตาอบโปรตีน",
+    "germ": "🌽 เตาอบเยอม",
     "hsw": "💧 HSW"
 }
 
@@ -198,9 +198,18 @@ def load_sheet_data(df, sheet_name):
         data_df["เวลาหยุดเครื่อง (ชั่วโมง)"] = 0.0
         data_df["เวลาหยุดเครื่อง (นาที)"] = 0.0
         
-    # Calculate variance if not present
-    if "ส่วนต่าง (ตัน)" not in data_df.columns and "แผนผลิต (ตัน)" in data_df.columns and "ผลิตได้ (ตัน)" in data_df.columns:
-        data_df["ส่วนต่าง (ตัน)"] = data_df["ผลิตได้ (ตัน)"] - data_df["แผนผลิต (ตัน)"]
+    # Always recalculate yield deduction if columns exist
+    deduct_cols = [col for col in data_df.columns if "ผลผลิตที่หัก" in col]
+    mix_cols = [col for col in data_df.columns if "จำนวนผสม" in col]
+    if deduct_cols and mix_cols:
+        data_df[deduct_cols[0]] = data_df["ผลิตได้ (ตัน)"] - data_df[mix_cols[0]]
+        
+    # Always recalculate variance
+    if "แผนผลิต (ตัน)" in data_df.columns:
+        if deduct_cols:
+            data_df["ส่วนต่าง (ตัน)"] = data_df[deduct_cols[0]] - data_df["แผนผลิต (ตัน)"]
+        elif "ผลิตได้ (ตัน)" in data_df.columns:
+            data_df["ส่วนต่าง (ตัน)"] = data_df["ผลิตได้ (ตัน)"] - data_df["แผนผลิต (ตัน)"]
         
     # Clean remarks column
     remarks_col = [col for col in data_df.columns if "หมายเหตุ" in col]
@@ -308,16 +317,6 @@ if excel_path:
                                 val = '-'
                             ws.cell(row=sheet_row, column=col_idx, value=val)
                     
-                    # Recalculate variance
-                    if 'ส่วนต่าง (ตัน)' in header_cols:
-                        plan_val = row.get('แผนผลิต (ตัน)', 0)
-                        actual_val = row.get('ผลิตได้ (ตัน)', 0)
-                        try:
-                            diff_val = float(actual_val) - float(plan_val)
-                        except:
-                            diff_val = 0.0
-                        ws.cell(row=sheet_row, column=header_cols['ส่วนต่าง (ตัน)'], value=diff_val)
-                        
                     # Recalculate yield deduction if columns exist
                     deduct_target_col = None
                     mix_col = None
@@ -326,18 +325,28 @@ if excel_path:
                             deduct_target_col = col_name
                         elif "จำนวนผสม" in col_name:
                             mix_col = col_name
+                            
+                    actual_val = float(row.get('ผลิตได้ (ตัน)', 0))
+                    mix_val = 0.0
+                    deduct_val = actual_val
+                    
                     if deduct_target_col and mix_col:
-                        actual_val = row.get('ผลิตได้ (ตัน)', 0)
                         mix_cell_val = ws.cell(row=sheet_row, column=header_cols[mix_col]).value
                         try:
                             mix_val = float(mix_cell_val) if mix_cell_val is not None else 0.0
                         except:
                             mix_val = 0.0
-                        try:
-                            deduct_val = float(actual_val) - mix_val
-                        except:
-                            deduct_val = 0.0
+                        deduct_val = actual_val - mix_val
                         ws.cell(row=sheet_row, column=header_cols[deduct_target_col], value=deduct_val)
+                        
+                    # Recalculate variance
+                    if 'ส่วนต่าง (ตัน)' in header_cols:
+                        plan_val = float(row.get('แผนผลิต (ตัน)', 0))
+                        if deduct_target_col:
+                            diff_val = deduct_val - plan_val
+                        else:
+                            diff_val = actual_val - plan_val
+                        ws.cell(row=sheet_row, column=header_cols['ส่วนต่าง (ตัน)'], value=diff_val)
 
             wb.save(excel_path)
             wb.close()
