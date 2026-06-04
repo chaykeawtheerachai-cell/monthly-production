@@ -130,9 +130,9 @@ st.sidebar.markdown("""
 """, unsafe_allow_html=True)
 
 # Find Excel files in workspace directory
-excel_files = glob.glob("*.xlsx")
+excel_files = [f for f in glob.glob("*.xlsx") if not os.path.basename(f).startswith("~$")]
 if not excel_files:
-    excel_files = glob.glob("../*.xlsx")
+    excel_files = [f for f in glob.glob("../*.xlsx") if not os.path.basename(f).startswith("~$")]
 
 if excel_files:
     file_options = {os.path.basename(f): f for f in excel_files}
@@ -234,6 +234,37 @@ def get_thai_name(sheet_name):
             return val
     return sheet_name
 
+# Helper to apply live data editor edits to a active copy of df for dynamic UI updates
+def apply_editor_changes(df, page_key):
+    editor_key = f"editor_table_{page_key}"
+    if editor_key in st.session_state:
+        state = st.session_state[editor_key]
+        if "edited_rows" in state and state["edited_rows"]:
+            df = df.copy()
+            for idx, changes in state["edited_rows"].items():
+                for col, val in changes.items():
+                    if col in df.columns:
+                        df.iat[idx, df.columns.get_loc(col)] = val
+            
+            # Recalculate derived columns in df
+            # 1. Yield deduction
+            deduct_cols = [col for col in df.columns if "ผลผลิตที่หัก" in col]
+            mix_cols = [col for col in df.columns if "จำนวนผสม" in col]
+            if deduct_cols and mix_cols:
+                df[deduct_cols[0]] = df["ผลิตได้ (ตัน)"] - df[mix_cols[0]]
+            
+            # 2. Variance
+            if "แผนผลิต (ตัน)" in df.columns:
+                if deduct_cols:
+                    df["ส่วนต่าง (ตัน)"] = df[deduct_cols[0]] - df["แผนผลิต (ตัน)"]
+                elif "ผลิตได้ (ตัน)" in df.columns:
+                    df["ส่วนต่าง (ตัน)"] = df["ผลิตได้ (ตัน)"] - df["แผนผลิต (ตัน)"]
+            
+            # 3. Downtime in hours
+            if "เวลาหยุดเครื่อง (นาที)" in df.columns:
+                df["เวลาหยุดเครื่อง (ชั่วโมง)"] = df["เวลาหยุดเครื่อง (นาที)"] / 60.0
+    return df
+
 # Main Program Execution
 if excel_path:
     try:
@@ -306,7 +337,7 @@ if excel_path:
                 sheet_row = excel_date_to_row.get(date_str)
                 if sheet_row is not None:
                     # Write editable cells
-                    cols_to_write = ['แผนผลิต (ตัน)', 'ผลิตได้ (ตัน)', 'เวลาหยุดเครื่อง (นาที)', 'หมายเหตุ']
+                    cols_to_write = ['แผนผลิต (ตัน)', 'ผลิตได้ (ตัน)', 'ส่วนต่าง (ตัน)', 'เวลาหยุดเครื่อง (นาที)', 'หมายเหตุ']
                     for col_name in cols_to_write:
                         if col_name in header_cols and col_name in row:
                             col_idx = header_cols[col_name]
@@ -339,13 +370,17 @@ if excel_path:
                         deduct_val = actual_val - mix_val
                         ws.cell(row=sheet_row, column=header_cols[deduct_target_col], value=deduct_val)
                         
-                    # Recalculate variance
+                    # Recalculate variance or save user manual edit
                     if 'ส่วนต่าง (ตัน)' in header_cols:
-                        plan_val = float(row.get('แผนผลิต (ตัน)', 0))
-                        if deduct_target_col:
-                            diff_val = deduct_val - plan_val
+                        if 'ส่วนต่าง (ตัน)' in row and not pd.isna(row['ส่วนต่าง (ตัน)']):
+                            try:
+                                diff_val = float(row['ส่วนต่าง (ตัน)'])
+                            except:
+                                plan_val = float(row.get('แผนผลิต (ตัน)', 0))
+                                diff_val = (deduct_val - plan_val) if deduct_target_col else (actual_val - plan_val)
                         else:
-                            diff_val = actual_val - plan_val
+                            plan_val = float(row.get('แผนผลิต (ตัน)', 0))
+                            diff_val = (deduct_val - plan_val) if deduct_target_col else (actual_val - plan_val)
                         ws.cell(row=sheet_row, column=header_cols['ส่วนต่าง (ตัน)'], value=diff_val)
 
             wb.save(excel_path)
@@ -608,6 +643,9 @@ if excel_path:
             sheet_name, df = get_sheet_and_data_for_page(page_key)
             
             if df is not None:
+                # Apply live edits from the editor table to an active copy of df for reactive cards and charts
+                df_active = apply_editor_changes(df, page_key)
+                
                 # 1. Header Card matching Image 3 (Linear gradient with pulse/waveform SVG)
                 st.markdown(f"""
                 <div style="display: flex; align-items: center; gap: 15px; background: linear-gradient(135deg, #1e3a8a 0%, #3b82f6 100%); color: white; padding: 20px; border-radius: 16px; margin-bottom: 25px; box-shadow: 0 4px 10px rgba(30, 58, 138, 0.15);">
@@ -623,11 +661,17 @@ if excel_path:
                 </div>
                 """, unsafe_allow_html=True)
                 
-                # Fetch statistics
-                target_sum = df['แผนผลิต (ตัน)'].sum() if 'แผนผลิต (ตัน)' in df.columns else 0
-                actual_sum = df['ผลิตได้ (ตัน)'].sum() if 'ผลิตได้ (ตัน)' in df.columns else 0
-                diff_sum = actual_sum - target_sum
-                downtime_sum_mins = df['เวลาหยุดเครื่อง (นาที)'].sum() if 'เวลาหยุดเครื่อง (นาที)' in df.columns else 0
+                # Fetch statistics from active df
+                target_sum = df_active['แผนผลิต (ตัน)'].sum() if 'แผนผลิต (ตัน)' in df_active.columns else 0
+                actual_sum = df_active['ผลิตได้ (ตัน)'].sum() if 'ผลิตได้ (ตัน)' in df_active.columns else 0
+                
+                # Sum the manually edited variance if present, otherwise calculate it
+                if 'ส่วนต่าง (ตัน)' in df_active.columns:
+                    diff_sum = df_active['ส่วนต่าง (ตัน)'].sum()
+                else:
+                    diff_sum = actual_sum - target_sum
+                    
+                downtime_sum_mins = df_active['เวลาหยุดเครื่อง (นาที)'].sum() if 'เวลาหยุดเครื่อง (นาที)' in df_active.columns else 0
                 
                 diff_prefix = "+" if diff_sum >= 0 else ""
                 diff_color = "#15803d" if diff_sum >= 0 else "#dc2626"
@@ -675,15 +719,15 @@ if excel_path:
                     # Grouped Bar chart comparing Target vs Actual daily
                     fig_daily = go.Figure()
                     fig_daily.add_trace(go.Bar(
-                        x=df['วันที่ผลิต'],
-                        y=df['แผนผลิต (ตัน)'],
+                        x=df_active['วันที่ผลิต'],
+                        y=df_active['แผนผลิต (ตัน)'],
                         name='แผนผลิต (Plan)',
                         marker_color='#1e3a8a',
                         marker_cornerradius=8
                     ))
                     fig_daily.add_trace(go.Bar(
-                        x=df['วันที่ผลิต'],
-                        y=df['ผลิตได้ (ตัน)'],
+                        x=df_active['วันที่ผลิต'],
+                        y=df_active['ผลิตได้ (ตัน)'],
                         name='ผลิตได้จริง (Actual)',
                         marker_color='#84cc16',
                         marker_cornerradius=8
@@ -708,23 +752,24 @@ if excel_path:
                         st.plotly_chart(fig_daily, use_container_width=True)
                     
                     # Calculate Monthly Key Stats for selected oven
-                    best_day_idx = df['ผลิตได้ (ตัน)'].idxmax() if not df.empty and 'ผลิตได้ (ตัน)' in df.columns else None
+                    best_day_idx = df_active['ผลิตได้ (ตัน)'].idxmax() if not df_active.empty and 'ผลิตได้ (ตัน)' in df_active.columns else None
                     if best_day_idx is not None and not pd.isna(best_day_idx):
-                        best_day_row = df.loc[best_day_idx]
+                        best_day_row = df_active.loc[best_day_idx]
                         best_day_val = best_day_row['ผลิตได้ (ตัน)']
                         best_day_dt = best_day_row['วันที่ผลิต'].strftime('%d/%m/%Y')
                     else:
                         best_day_val = 0
                         best_day_dt = "-"
                         
-                    days_met = (df['ผลิตได้ (ตัน)'] >= df['แผนผลิต (ตัน)']).sum() if 'แผนผลิต (ตัน)' in df.columns and 'ผลิตได้ (ตัน)' in df.columns else 0
-                    total_days = len(df)
+                    days_met = (df_active['ผลิตได้ (ตัน)'] >= df_active['แผนผลิต (ตัน)']).sum() if 'แผนผลิต (ตัน)' in df_active.columns and 'ผลิตได้ (ตัน)' in df_active.columns else 0
+                    total_days = len(df_active)
                     achievement_pct = (days_met / total_days * 100) if total_days > 0 else 0
                     
-                    avg_actual = df['ผลิตได้ (ตัน)'].mean() if 'ผลิตได้ (ตัน)' in df.columns else 0
-                    avg_plan = df['แผนผลิต (ตัน)'].mean() if 'แผนผลิต (ตัน)' in df.columns else 0
+                    avg_actual = df_active['ผลิตได้ (ตัน)'].mean() if 'ผลิตได้ (ตัน)' in df_active.columns else 0
+                    avg_plan = df_active['แผนผลิต (ตัน)'].mean() if 'แผนผลิต (ตัน)' in df_active.columns else 0
                     
-                    avg_downtime = df['เวลาหยุดเครื่อง (นาที)'].mean() if 'เวลาหยุดเครื่อง (นาที)' in df.columns else 0
+                    avg_downtime = df_active['เวลาหยุดเครื่อง (นาที)'].mean() if 'เวลาหยุดเครื่อง (นาที)' in df_active.columns else 0
+                    days_with_downtime = (df_active['เวลาหยุดเครื่อง (นาที)'] > 0).sum() if 'เวลาหยุดเครื่อง (นาที)' in df_active.columns else 0
                     
                     with st.container(border=True):
                         st.markdown("<h3 style='margin-top:0; color: #1e3a8a; font-size: 1.1rem; border-bottom: 1.5px solid #e2e8f0; padding-bottom: 8px;'>🏆 สถิติสำคัญประจำเดือน (Monthly Key Stats)</h3>", unsafe_allow_html=True)
@@ -758,79 +803,26 @@ if excel_path:
                                 </div>
                             </div>
                             <!-- Avg Downtime -->
-                            <div style="background-color: #fff7ed; border: 1px solid #fed7aa; border-radius: 12px; padding: 15px; display: flex; align-items: center; gap: 12px;">
+                            <div style="background-color: #fff7ed; border: 1px solid #ffedd5; border-radius: 12px; padding: 15px; display: flex; align-items: center; gap: 12px;">
                                 <div style="background-color: #ffedd5; font-size: 1.8rem; border-radius: 10px; width: 45px; height: 45px; display: flex; align-items: center; justify-content: center; color: #c2410c;">⏱️</div>
                                 <div>
-                                    <div style="color: #9a3412; font-size: 0.8rem; font-weight: 600;">หยุดทำงานเฉลี่ย (Avg Daily Downtime)</div>
-                                    <div style="font-size: 1.15rem; font-weight: 700; color: #7c2d12;">{avg_downtime:.1f} นาที/วัน</div>
-                                    <div style="font-size: 0.75rem; color: #9a3412;">({avg_downtime/60.0:.2f} ชั่วโมง/วัน)</div>
+                                    <div style="color: #9a3412; font-size: 0.8rem; font-weight: 600;">เวลาหยุดเครื่องเฉลี่ย (Avg Downtime)</div>
+                                    <div style="font-size: 1.15rem; font-weight: 700; color: #7c2d12;">{avg_downtime:,.1f} นาที</div>
+                                    <div style="font-size: 0.75rem; color: #9a3412;">เกิดเหตุ {days_with_downtime} วันในเดือนนี้</div>
                                 </div>
                             </div>
                         </div>
                         """, unsafe_allow_html=True)
-                    
-                    # downtime causes formatted with pink/red bars exactly like Image 3
-                with col_reasons:
-                    with st.container(border=True):
-                        st.markdown("<h3 style='margin-top:0; color: #1e293b; font-size: 1.1rem; border-bottom: 1.5px solid #e2e8f0; padding-bottom: 8px; text-align: center;'>สาเหตุการหยุดเครื่อง</h3>", unsafe_allow_html=True)
-                        
-                        # Group and calculate reasons
-                        reasons = df[df['เวลาหยุดเครื่อง (นาที)'] > 0].copy()
-                        reasons_grouped = reasons.groupby('หมายเหตุ_สะอาด')['เวลาหยุดเครื่อง (นาที)'].sum().reset_index()
-                        reasons_grouped = reasons_grouped[reasons_grouped['หมายเหตุ_สะอาด'] != ""]
-                        reasons_grouped = reasons_grouped.sort_values(by='เวลาหยุดเครื่อง (นาที)', ascending=False)
-                        
-                        # Donut chart showing the proportion of downtime for each reason (mockup circle)
-                        if not reasons_grouped.empty:
-                            fig_reasons_pie = px.pie(
-                                reasons_grouped.head(6),
-                                values='เวลาหยุดเครื่อง (นาที)',
-                                names='หมายเหตุ_สะอาด',
-                                hole=0.4,
-                                color_discrete_sequence=px.colors.sequential.Reds_r
-                            )
-                            fig_reasons_pie.update_layout(
-                                margin=dict(l=10, r=10, t=10, b=10),
-                                height=200,
-                                showlegend=False,
-                                paper_bgcolor='rgba(0,0,0,0)',
-                            )
-                            st.plotly_chart(fig_reasons_pie, use_container_width=True)
-                            
-                        reasons_html = ""
-                        if not reasons_grouped.empty:
-                            max_dt = reasons_grouped['เวลาหยุดเครื่อง (นาที)'].max()
-                            for _, row in reasons_grouped.head(6).iterrows():
-                                # Percent width for bar
-                                pct_width = (row['เวลาหยุดเครื่อง (นาที)'] / max_dt * 100) if max_dt > 0 else 0
-                                # Ensure it has a small visible width if value > 0
-                                pct_width = max(pct_width, 8)
-                                
-                                reasons_html += f"""
-                                <div style="margin-bottom: 16px;">
-                                    <div style="display: flex; justify-content: space-between; font-size: 0.85rem; font-weight: 600; color: #475569;">
-                                        <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 170px;">{row['หมายเหตุ_สะอาด']}</span>
-                                        <span style="color: #ef4444;">{row['เวลาหยุดเครื่อง (นาที)']:,.0f} นาที ({row['เวลาหยุดเครื่อง (นาที)']/60.0:.2f} ชม.)</span>
-                                    </div>
-                                    <div style="background-color: #f1f5f9; border-radius: 4px; height: 10px; margin-top: 5px; overflow: hidden;">
-                                        <div style="background-color: #ff6b6b; width: {pct_width}%; height: 100%; border-radius: 4px;"></div>
-                                    </div>
-                                </div>
-                                """
-                        else:
-                            reasons_html = "<div style='color: #166534; font-weight: 600; text-align: center; padding-top: 100px;'>🎉 ไม่พบประวัติสาเหตุหยุดเครื่อง</div>"
-                            
-                        st.markdown(reasons_html, unsafe_allow_html=True)
-                    
-                # 3. Middle: Interactive Daily Detail Viewer (กดเลือกวันไหนข้อมูลนั้นจะแสดงขึ้นมา)
+                
+                # 3. Middle: Interactive Daily Detail Viewer
                 st.markdown("### 🔍 เจาะลึกข้อมูลรายวัน (Daily Detail Viewer)")
                 
                 # Dropdown for selecting day
-                day_options = df.sort_values('วันที่ผลิต')['วันที่ผลิต'].dt.strftime('%d (%Y-%m-%d)').tolist()
+                day_options = df_active.sort_values('วันที่ผลิต')['วันที่ผลิต'].dt.strftime('%d (%Y-%m-%d)').tolist()
                 selected_day_str = st.selectbox("เลือกวันที่ผลิตที่ต้องการดูรายละเอียด:", day_options)
                 
                 selected_date_parsed = pd.to_datetime(selected_day_str.split('(')[1].replace(')', '').strip())
-                day_row = df[df['วันที่ผลิต'] == selected_date_parsed].iloc[0]
+                day_row = df_active[df_active['วันที่ผลิต'] == selected_date_parsed].iloc[0]
                 
                 plan_day = day_row.get('แผนผลิต (ตัน)', 0)
                 actual_day = day_row.get('ผลิตได้ (ตัน)', 0)
@@ -905,7 +897,7 @@ if excel_path:
                             st.rerun()
                         except Exception as ex:
                             st.error(f"เกิดข้อผิดพลาดในการบันทึกข้อมูล: {str(ex)}")
-
+ 
                 
                 # 4. Bottom: Detailed daily table ("ขอรายละเอียด รายวันขึ้นข้อมูลด้วย และจัดให้ดูสวยงามครับ")
                 st.markdown("### 📋 รายละเอียดข้อมูลรายวัน (Daily Log)")
@@ -925,16 +917,23 @@ if excel_path:
                 cols_to_render = [c for c in cols_order if c in display_df.columns]
                 
                 with st.container(border=True):
-                    # Set up data editor with disabled calculated fields
-                    disabled_cols = ['วันที่ผลิต', 'ส่วนต่าง (ตัน)', 'เวลาหยุดเครื่อง (ชั่วโมง)']
+                    # Set up data editor with disabled calculated fields (ส่วนต่าง (ตัน) is now EDITABLE)
+                    disabled_cols = ['วันที่ผลิต', 'เวลาหยุดเครื่อง (ชั่วโมง)']
+                    
+                    # Prepare dataframe copy to prevent representation float issues
+                    df_to_edit = df[cols_to_render].copy()
+                    if 'วันที่ผลิต' in df_to_edit.columns:
+                        df_to_edit['วันที่ผลิต'] = df_to_edit['วันที่ผลิต'].dt.date
+                    for c in df_to_edit.select_dtypes(include=['float64', 'float32']).columns:
+                        df_to_edit[c] = df_to_edit[c].round(2)
+                        
                     edited_df = st.data_editor(
-                        df[cols_to_render],
+                        df_to_edit,
                         disabled=[c for c in disabled_cols if c in cols_to_render],
                         use_container_width=True,
                         hide_index=True,
                         key=f"editor_table_{page_key}"
                     )
-                    
                     col_b1, col_b2 = st.columns(2)
                     with col_b1:
                         if st.button("💾 บันทึกการแก้ไขในตารางทั้งหมด (Save All Table Changes)", key=f"btn_save_table_{page_key}"):
